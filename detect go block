@@ -1,2 +1,55 @@
-# detect-only
-6767
+package main
+
+import (
+	"log"
+	"net"
+	"net/http"
+)
+
+// IP ที่ถูก block — แก้ตรงนี้ได้เลย
+var blockedIPs = map[string]bool{
+	"2405:9800:b550:d7f5:d054:d1b9:fec9:aaa5": true,
+	// เพิ่ม IP ที่อยากบล็อกตรงนี้ เช่น:
+	// "203.0.113.45": true,
+}
+
+// getClientIP ดึง IP จริงของ client
+// ถ้ารันหลัง proxy (เช่น Nginx, Cloudflare) จะดูจาก X-Forwarded-For ก่อน
+func getClientIP(r *http.Request) string {
+	// เช็ค X-Forwarded-For (ใช้ตอนรันหลัง reverse proxy)
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		return xff
+	}
+	// เช็ค X-Real-IP
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		return xri
+	}
+	// fallback: ดึงจาก RemoteAddr
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// Logger เป็น middleware ที่ log ทุก request + บล็อก IP ที่อยู่ใน blockedIPs
+func Logger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := getClientIP(r)
+
+		log.Printf("[%s] %s %s  UA=%q",
+			ip,
+			r.Method,
+			r.URL.Path,
+			r.UserAgent(),
+		)
+
+		if blockedIPs[ip] {
+			log.Printf("⛔ BLOCKED: %s tried to access %s", ip, r.URL.Path)
+			http.Error(w, "Kuy ar rai 🖕", http.StatusForbidden)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
