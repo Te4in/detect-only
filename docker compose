@@ -1,0 +1,196 @@
+services:
+  # ============================================
+  # SERVICE 1: PostgreSQL Database
+  # ============================================
+  db:
+    image: postgres:16-alpine
+    # ^^^ 🔧 เปลี่ยนได้: version ของ Postgres (เช่น 15-alpine, 17-alpine)
+    #     ถ้าโจทย์ไม่ระบุ version แนะนำ 16-alpine (เสถียร + image เล็ก)
+
+    container_name: app-db
+    # ^^^ 🔧 เปลี่ยนได้: ชื่อ container ตอน docker ps จะเห็นชื่อนี้
+    #     ตั้งให้สื่อกับโปรเจกต์ เช่น grindstone-db
+
+    restart: unless-stopped
+    # ^^^ container ล้มแล้วรีสตาร์ทอัตโนมัติ (ยกเว้นคุณสั่ง stop เอง)
+
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      # ^^^ ⚠️ ต้องใส่ใน .env: DB_USER=ชื่อผู้ใช้ DB เช่น appuser
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      # ^^^ ⚠️ ต้องใส่ใน .env: DB_PASSWORD=รหัสยาวๆ สุ่มมา เช่นใช้ openssl rand -base64 32
+      POSTGRES_DB: ${DB_NAME}
+      # ^^^ ⚠️ ต้องใส่ใน .env: DB_NAME=ชื่อ database เช่น appdb
+
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+      # ^^^ เก็บข้อมูล DB ลง volume ชื่อ dbdata (ข้อมูลจะไม่หายเวลา container ตาย)
+
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      # ^^^ ⚠️ ต้องสร้างไฟล์ init.sql เอง: ใส่ CREATE TABLE, INSERT seed data
+      #     :ro = read-only, container อ่านได้อย่างเดียว
+      #     ถ้าไม่มีไฟล์นี้ ลบบรรทัดนี้ทิ้งได้
+
+    networks:
+      - backend
+      # ^^^ DB อยู่ใน network "backend" เท่านั้น
+      #     คนนอก (internet) เข้าตรงๆ ไม่ได้ ต้องผ่าน backend container
+
+    # หมายเหตุ: ไม่มี ports: เจตนา - กัน DB หลุดออกไปอินเทอร์เน็ต
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      # ^^^ คำสั่งเช็คว่า DB พร้อมรับ connection หรือยัง
+      interval: 10s   # 🔧 เช็คทุกกี่วินาที
+      timeout: 5s     # 🔧 รอ response นานสุดกี่วินาที
+      retries: 5      # 🔧 ลองซ้ำกี่ครั้งก่อนถือว่า unhealthy
+
+    security_opt:
+      - no-new-privileges:true
+      # ^^^ กัน process ใน container ยกระดับสิทธิ์ตัวเอง (security hardening)
+
+
+  # ============================================
+  # SERVICE 2: Go Backend (net/http)
+  # ============================================
+  backend:
+    build:
+      context: ./backend
+      # ^^^ ⚠️ ต้องมีโฟลเดอร์ ./backend ที่เก็บโค้ด Go ทั้งหมด (main.go, go.mod, ฯลฯ)
+      #     ถ้าโครงสร้างโฟลเดอร์ต่างจากนี้ แก้ path ให้ตรง
+      dockerfile: Dockerfile
+      # ^^^ ⚠️ ต้องสร้าง ./backend/Dockerfile เอง (multi-stage build Go)
+
+    container_name: app-backend
+    # ^^^ 🔧 เปลี่ยนได้: ชื่อ container
+
+    restart: unless-stopped
+
+    environment:
+      DB_HOST: db
+      # ^^^ ชื่อ host = ชื่อ service "db" ด้านบน (Docker DNS จัดการให้)
+      #     ❌ อย่าใส่ localhost หรือ 127.0.0.1 - มันคนละ container กัน
+      DB_PORT: 5432
+      # ^^^ port default ของ Postgres ไม่ต้องแก้ ยกเว้นเปลี่ยน image
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      # ^^^ ทั้ง 3 ตัวอ่านจาก .env เดียวกับ db service
+
+      JWT_SECRET: ${JWT_SECRET}
+      # ^^^ ⚠️ ต้องใส่ใน .env: JWT_SECRET=สุ่มมาอย่างน้อย 32 bytes
+      #     ใช้คำสั่ง: openssl rand -hex 64
+      #     ถ้า secret อ่อน → คนปลอม JWT token ได้
+
+      APP_ENV: production
+      # ^^^ 🔧 ใช้ใน Go code เช็ค: ถ้า production ปิด debug log, error stack trace
+      #     ค่าอื่นที่ใช้กัน: development, staging
+
+      # 💡 ตรงนี้ใส่ env เพิ่มได้ตามที่ Go code คุณต้องใช้ เช่น:
+      # PORT: 8080
+      # LOG_LEVEL: info
+      # CORS_ORIGIN: https://yourdomain.com
+
+    depends_on:
+      db:
+        condition: service_healthy
+        # ^^^ รอ db ผ่าน healthcheck ก่อนค่อยสตาร์ท backend
+        #     กัน backend boot ขึ้นมาแต่ DB ยังไม่พร้อม → crash
+
+    networks:
+      - backend   # คุยกับ DB ได้
+      - frontend  # คุยกับ frontend ได้
+      # ^^^ backend อยู่ตรงกลาง เป็น "สะพาน" ระหว่าง frontend กับ DB
+
+    security_opt:
+      - no-new-privileges:true
+
+    read_only: true
+    # ^^^ root filesystem เป็น read-only ทั้ง container
+    #     ถ้าโดน RCE แฮกเกอร์เขียนไฟล์ใส่ disk ไม่ได้
+    #     ⚠️ ถ้า Go code คุณต้องเขียนไฟล์ (เช่น upload, log file) → ต้อง mount volume เพิ่ม
+    tmpfs:
+      - /tmp
+      # ^^^ ให้ /tmp เขียนได้ใน memory (RAM) เพราะบาง lib ใช้ /tmp
+
+    cap_drop:
+      - ALL
+      # ^^^ ตัด Linux capabilities ทั้งหมด - container ทำ kernel operation ไม่ได้
+      #     Go web server ปกติไม่ต้องใช้ cap อะไรอยู่แล้ว
+
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'      # 🔧 ใช้ CPU สูงสุด 1 core (ปรับตาม spec VPS)
+          memory: 512M     # 🔧 ใช้ RAM สูงสุด 512MB (ปรับตาม spec VPS)
+          # ถ้า VPS แรงเช่น 4 core 8GB → ปรับเป็น cpus: '2.0', memory: 2G ได้
+
+
+  # ============================================
+  # SERVICE 3: Svelte Frontend
+  # ============================================
+  frontend:
+    build:
+      context: ./frontend
+      # ^^^ ⚠️ ต้องมีโฟลเดอร์ ./frontend ที่เก็บโค้ด Svelte
+      dockerfile: Dockerfile
+      # ^^^ ⚠️ ต้องสร้าง ./frontend/Dockerfile (build Svelte → serve ด้วย nginx)
+
+    container_name: app-frontend
+
+    restart: unless-stopped
+
+    ports:
+      - "80:80"
+      # ^^^ map port host:container → ผู้ใช้ภายนอกเข้า http://your-vps-ip:80
+      - "443:443"
+      # ^^^ สำหรับ HTTPS (ต้อง config SSL cert ใน nginx ของ frontend ด้วย)
+      #     🔧 ถ้ายังไม่มี SSL ตัดบรรทัดนี้ออกก่อนได้
+
+    depends_on:
+      - backend
+      # ^^^ รอ backend สตาร์ทก่อน (แต่ไม่รอ healthcheck เพราะ frontend ไม่มีใน config)
+
+    networks:
+      - frontend
+      # ^^^ frontend ไม่ได้อยู่ใน "backend" network → เข้า DB ตรงๆ ไม่ได้
+      #     ต้องเรียก API ผ่าน backend service เท่านั้น
+
+    security_opt:
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+      # ^^^ ต้องการ cap นี้เพื่อ bind port 80/443 (port < 1024 ต้องมีสิทธิ์พิเศษ)
+
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'      # 🔧 frontend แค่ serve static file ใช้น้อยพอ
+          memory: 256M     # 🔧
+
+
+# ============================================
+# NETWORKS - แยก zone ความปลอดภัย
+# ============================================
+networks:
+  backend:
+    driver: bridge
+    internal: false
+    # ^^^ 🔧 ถ้าตั้ง true → network นี้ออกอินเทอร์เน็ตไม่ได้เลย
+    #     ตอนนี้ false เพราะ backend อาจต้องเรียก external API
+    #     ถ้า backend ไม่ต้องออกเน็ต → เปลี่ยนเป็น true เพื่อความปลอดภัยสูงสุด
+  frontend:
+    driver: bridge
+
+
+# ============================================
+# VOLUMES - ที่เก็บข้อมูลถาวร
+# ============================================
+volumes:
+  dbdata:
+    driver: local
+    # ^^^ เก็บไฟล์ DB ไว้ใน Docker volume (host path: /var/lib/docker/volumes/...)
+    #     ⚠️ ถ้า docker compose down -v → ข้อมูลหายหมด ใช้แค่ docker compose down เฉยๆ ปลอดภัย
